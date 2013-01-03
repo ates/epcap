@@ -36,6 +36,7 @@
 #include <err.h>
 #include <signal.h>
 #include <fcntl.h>
+#include <netinet/ip.h>
 
 #include <sys/select.h>
 
@@ -55,6 +56,9 @@
 
 #define SNAPLEN         65535
 #define PROMISC         1       /* true */
+#define ETHERNET_SIZE 14
+
+#define IP_HL(ip) (((ip)->ip_hl) & 0x0f)
 
 /* On Linux, 0 will block until the next packet is received.
  * On BSD, 0 will block until the snaplen buffer is full.

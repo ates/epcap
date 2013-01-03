@@ -32,16 +32,19 @@
 #include <ei.h>
 
 #include "epcap.h"
+#include "sctp.h"
+#include "list.h"
 
 int epcap_open(EPCAP_STATE *ep);
 int epcap_init(EPCAP_STATE *ep);
 void epcap_loop(EPCAP_STATE *ep);
 void epcap_ctrl(const char *ctrl_evt);
-void epcap_response(struct pcap_pkthdr *hdr, const u_char *pkt, unsigned int datalink);
+void epcap_response(struct pcap_pkthdr *hdr, const u_char *pkt, uint16_t dl);
 void epcap_send_free(ei_x_buff *msg);
 void epcap_watch();
 void gotsig(int sig);
 void usage(EPCAP_STATE *ep);
+static uint16_t sctp_chunk_length(uint16_t len);
 
 int child_exited = 0;
 
@@ -189,8 +192,7 @@ epcap_open(EPCAP_STATE *ep)
 }
 
 
-    int
-epcap_init(EPCAP_STATE *ep)
+int epcap_init(EPCAP_STATE *ep)
 {
     struct bpf_program fcode;
     char errbuf[PCAP_ERRBUF_SIZE];
@@ -221,8 +223,7 @@ epcap_init(EPCAP_STATE *ep)
 }
 
 
-    void
-epcap_loop(EPCAP_STATE *ep)
+void epcap_loop(EPCAP_STATE *ep)
 {
     pcap_t *p = ep->p;
     struct pcap_pkthdr *hdr = NULL;
@@ -265,20 +266,26 @@ void epcap_ctrl(const char *ctrl_evt)
     epcap_send_free(&msg);
 }
 
-    void
-epcap_response(struct pcap_pkthdr *hdr, const u_char *pkt, unsigned int datalink)
+void epcap_response(struct pcap_pkthdr *hdr, const u_char *pkt, uint16_t dl)
 {
     ei_x_buff msg;
+    unsigned int chunks = 0;
+    const struct ip *ip_pkt = (struct ip *)(pkt + ETHERNET_SIZE);
+    u_char *payload;
+    sctp_chunk_data_t *sctp_data;
+    struct node *list = NULL;
+    uint16_t chunk_size = 0;
 
+    u_char *tmp = (u_char *)pkt + ETHERNET_SIZE + (IP_HL(ip_pkt) * 4);
+
+    /* Skip the SCTP header */
+    tmp += SCTP_HEADER_LENGTH;
 
     IS_FALSE(ei_x_new_with_version(&msg));
 
-    /* {packet, DatalinkType, Time, ActualLength, Packet} */
-    IS_FALSE(ei_x_encode_tuple_header(&msg, 5));
+    /* {packet, Time, Packet} */
+    IS_FALSE(ei_x_encode_tuple_header(&msg, 3));
     IS_FALSE(ei_x_encode_atom(&msg, "packet"));
-
-    /* DataLinkType */
-    IS_FALSE(ei_x_encode_long(&msg, datalink));
 
     /* {MegaSec, Sec, MicroSec} */
     IS_FALSE(ei_x_encode_tuple_header(&msg, 3));
@@ -286,14 +293,37 @@ epcap_response(struct pcap_pkthdr *hdr, const u_char *pkt, unsigned int datalink
     IS_FALSE(ei_x_encode_long(&msg, hdr->ts.tv_sec % 1000000));
     IS_FALSE(ei_x_encode_long(&msg, hdr->ts.tv_usec));
 
-    /* ActualLength} */
-    IS_FALSE(ei_x_encode_long(&msg, hdr->len));
-
     /* Packet */
-    IS_FALSE(ei_x_encode_binary(&msg, pkt, hdr->caplen));
+    while (tmp < (pkt + hdr->caplen))
+    {
+        sctp_data = (sctp_chunk_data_t *)tmp;
+        chunk_size = sctp_chunk_length(sctp_data->len);
+        switch(*tmp)
+        {
+            case 0: /* SCTP DATA chunk */
+                if (ntohl(sctp_data->ppi) == SCTP_PAYLOAD_M3UA) {
+                    payload = tmp + SCTP_CHUNK_DATA_HEADER_LENGTH;
+                    push(&list, payload, chunk_size - SCTP_CHUNK_DATA_HEADER_LENGTH);
+                    chunks++;
+                }
+                break;
+            default:
+                break;
+        }
+        tmp += chunk_size;
+    }
 
-    /* } */
+    IS_FALSE(ei_x_encode_list_header(&msg, chunks));
 
+    struct node *current = list;
+    while (current != NULL)
+    {
+        IS_FALSE(ei_x_encode_binary(&msg, current->data, current->size));
+        current = current->next;
+    }
+    IS_FALSE(ei_x_encode_empty_list(&msg));
+
+    freelist(list);
     epcap_send_free(&msg);
 }
 
@@ -311,8 +341,7 @@ void epcap_send_free(ei_x_buff *msg)
     ei_x_free(msg);
 }
 
-    void
-gotsig(int sig)
+void gotsig(int sig)
 {
     switch (sig) {
         case SIGCHLD:
@@ -323,8 +352,7 @@ gotsig(int sig)
     }
 }
 
-    void
-usage(EPCAP_STATE *ep)
+void usage(EPCAP_STATE *ep)
 {
     (void)fprintf(stderr, "%s, %s\n", __progname, EPCAP_VERSION);
     (void)fprintf(stderr,
@@ -345,4 +373,14 @@ usage(EPCAP_STATE *ep)
             );
 
     exit (EXIT_FAILURE);
+}
+
+/* Calculates the length of chunk with padding detection */
+static uint16_t sctp_chunk_length(uint16_t len)
+{
+    uint16_t length = ntohs(len);
+
+    if (length % 4 == 0) return length;
+
+    return length + (4 - length % 4) - 4;
 }

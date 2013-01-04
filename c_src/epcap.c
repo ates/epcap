@@ -298,9 +298,13 @@ void epcap_response(struct pcap_pkthdr *hdr, const u_char *pkt, uint16_t dl)
     {
         sctp_data = (sctp_chunk_data_t *)tmp;
         chunk_size = sctp_chunk_length(sctp_data->len);
+        if (chunk_size <= 4)
+            chunk_size = 4;
         switch(*tmp)
         {
             case 0: /* SCTP DATA chunk */
+                if (chunk_size <= 16) break;
+
                 if (ntohl(sctp_data->ppi) == SCTP_PAYLOAD_M3UA) {
                     payload = tmp + SCTP_CHUNK_DATA_HEADER_LENGTH;
                     push(&list, payload, chunk_size - SCTP_CHUNK_DATA_HEADER_LENGTH);
